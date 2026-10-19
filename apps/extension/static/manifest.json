@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "SweepTrack",
+  "version": "0.1.0",
+  "description": "See which sweepstakes are due, fill entry forms from your profile, and log entries. You always click Submit.",
+  "action": { "default_popup": "popup.html", "default_title": "SweepTrack" },
+  "options_page": "options.html",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*"]
+}

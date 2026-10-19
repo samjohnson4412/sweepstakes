@@ -1,0 +1,17 @@
+{
+  "name": "sweeptrack",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @sweeptrack/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @sweeptrack/db generate",
+    "db:migrate": "pnpm --filter @sweeptrack/db migrate",
+    "db:seed": "pnpm --filter @sweeptrack/db seed"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  }
+}

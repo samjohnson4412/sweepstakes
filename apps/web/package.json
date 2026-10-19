@@ -1,0 +1,26 @@
+{
+  "name": "@sweeptrack/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@sweeptrack/core": "workspace:*",
+    "@sweeptrack/db": "workspace:*",
+    "next": "15.5.28",
+    "react": "19.1.10",
+    "react-dom": "19.1.10",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "~5.9.3"
+  }
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header><span>SweepTrack</span><a href="#" id="open-options" class="muted">Settings</a></header>
+    <div id="setup" hidden>
+      <section>Connect the extension to your account: <a href="#" id="setup-link">open settings</a>.</section>
+    </div>
+    <div id="main" hidden>
+      <section id="page">
+        <h3>This page</h3>
+        <div id="page-info" class="muted">Checking…</div>
+        <div class="row">
+          <select id="profile"></select>
+        </div>
+        <div class="row">
+          <button id="fill">Fill form</button>
+          <button id="mark" class="secondary" hidden>Mark entered</button>
+          <button id="add" class="secondary" hidden>Track this page</button>
+        </div>
+        <div id="page-status" class="status muted"></div>
+      </section>
+      <section>
+        <h3>Due now <span id="due-count"></span></h3>
+        <ul id="due"></ul>
+      </section>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
