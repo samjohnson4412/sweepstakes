@@ -1,14 +1,4 @@
-import {
-  canonicalUrl,
-  extractTitle,
-  findRulesLink,
-  htmlToText,
-  mailByDate,
-  nextEligibleAt,
-  parseRules,
-  type Frequency,
-  type ParsedRules,
-} from "@sweeptrack/core";
+import { mailByDate, nextEligibleAt, type Frequency } from "@sweeptrack/core";
 import {
   amoeEntries,
   and,
@@ -19,95 +9,10 @@ import {
   ne,
   sql,
   sweepstakes,
-  sweepstakesSources,
   trackedProfiles,
   trackedSweepstakes,
 } from "@sweeptrack/db";
-import { fetchPublicPage } from "./fetch-page";
-
-export interface ImportResult {
-  id: string;
-  created: boolean;
-  parsed: ParsedRules | null;
-  warning?: string;
-}
-
-/**
- * Add a sweepstakes to the global catalog (or find the existing one) from its URL.
- * Fetches the landing page and its official rules link, then runs the rules parser.
- */
-export async function importSweepstakes(
-  url: string,
-  opts: { userId?: string | null; sourceId?: string; title?: string } = {},
-): Promise<ImportResult> {
-  const canonical = canonicalUrl(url);
-  const existing = await db.query.sweepstakes.findFirst({ where: eq(sweepstakes.canonicalUrl, canonical) });
-  if (existing) {
-    await recordSource(existing.id, opts.sourceId ?? "user", url);
-    return { id: existing.id, created: false, parsed: null };
-  }
-
-  let title = opts.title ?? null;
-  let rulesUrl: string | null = null;
-  let parsed: ParsedRules | null = null;
-  let warning: string | undefined;
-  try {
-    const landing = await fetchPublicPage(url);
-    title ??= extractTitle(landing.html);
-    rulesUrl = findRulesLink(landing.html, landing.finalUrl);
-    let text = htmlToText(landing.html);
-    if (rulesUrl && rulesUrl !== landing.finalUrl) {
-      try {
-        text += "\n" + htmlToText((await fetchPublicPage(rulesUrl)).html);
-      } catch (e) {
-        warning = `Couldn't fetch rules page: ${(e as Error).message}`;
-      }
-    }
-    parsed = parseRules(text);
-  } catch (e) {
-    warning = `Couldn't fetch page, added with defaults: ${(e as Error).message}`;
-  }
-
-  const [row] = await db
-    .insert(sweepstakes)
-    .values({
-      canonicalUrl: canonical,
-      url,
-      rulesUrl,
-      title: title ?? new URL(url).hostname,
-      sponsor: parsed?.sponsor ?? null,
-      totalArvCents: parsed?.totalArv != null ? Math.round(parsed.totalArv * 100) : null,
-      startsAt: parsed?.startsAt ?? null,
-      endsAt: endOfDay(parsed?.endsAt ?? null),
-      frequency: parsed?.frequency ?? "daily",
-      minAge: parsed?.minAge ?? null,
-      countries: parsed?.countries ?? [],
-      excludedStates: parsed?.excludedStates ?? [],
-      amoe: parsed?.amoe.available ? parsed.amoe : null,
-      parseConfidence: parsed?.confidence ?? null,
-      submittedByUserId: opts.userId ?? null,
-    })
-    .onConflictDoNothing({ target: sweepstakes.canonicalUrl })
-    .returning();
-
-  // Lost a race with a concurrent import of the same URL.
-  const id = row?.id ?? (await db.query.sweepstakes.findFirst({ where: eq(sweepstakes.canonicalUrl, canonical) }))!.id;
-  await recordSource(id, opts.sourceId ?? "user", url);
-  return { id, created: Boolean(row), parsed, warning };
-}
-
-/** Parsed dates are noon UTC on the calendar day; treat the end date as end-of-day ET. */
-function endOfDay(d: Date | null): Date | null {
-  if (!d) return null;
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 3, 59, 59));
-}
-
-async function recordSource(sweepstakesId: string, sourceId: string, externalUrl: string) {
-  await db
-    .insert(sweepstakesSources)
-    .values({ sweepstakesId, sourceId, externalUrl })
-    .onConflictDoUpdate({ target: [sweepstakesSources.sweepstakesId, sweepstakesSources.sourceId], set: { seenAt: new Date() } });
-}
+export { importSweepstakes } from "@sweeptrack/ingest";
 
 /** Track a catalog item for a user; defaults to entering with all of the user's profiles. */
 export async function trackSweepstakes(userId: string, sweepstakesId: string, profileIds?: string[]): Promise<string> {

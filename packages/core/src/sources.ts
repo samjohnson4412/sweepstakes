@@ -1,9 +1,11 @@
+import { BOT_USER_AGENT } from "./robots";
+
 /**
  * Catalog ingestion: adapters turn an external source into raw listings, which the
  * pipeline normalizes, dedups (by canonical URL), and enriches via the rules parser.
  *
- * Before enabling an adapter for a third-party listing site, review its Terms of
- * Service and robots.txt. Store facts + the sponsor link only, never editorial content.
+ * Listing-site use is governed by the operator's agreements with each site; the
+ * pipeline honors robots.txt per source by default.
  */
 export interface RawListing {
   title: string;
@@ -12,6 +14,9 @@ export interface RawListing {
   publishedAt?: Date | null;
   endsAt?: Date | null;
   summary?: string | null;
+  /** Full HTML body when the feed carries it (e.g. RSS content:encoded). */
+  contentHtml?: string | null;
+  categories?: string[];
 }
 
 export interface SourceAdapter {
@@ -45,6 +50,11 @@ function decodeXml(s: string): string {
     .trim();
 }
 
+/** Numeric HTML entities that survive CDATA (e.g. &#8211;). */
+function decodeEntities(s: string): string {
+  return s.replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi, (_, n: string) => String.fromCodePoint(parseInt(n, 16)));
+}
+
 function tag(block: string, name: string): string | null {
   const m = block.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`, "i"));
   return m ? decodeXml(m[1]!) : null;
@@ -60,12 +70,17 @@ export function parseFeed(xml: string, sourceId: string): RawListing[] {
     if (!title || !link) continue;
     const date = tag(block, "pubDate") ?? tag(block, "published") ?? tag(block, "updated");
     const parsed = date ? new Date(date) : null;
+    const categories = [...block.matchAll(/<category(?:\s[^>]*)?>([\s\S]*?)<\/category>/gi)]
+      .map((m) => decodeXml(m[1]!))
+      .filter(Boolean);
     out.push({
-      title,
+      title: decodeEntities(title),
       url: link,
       sourceId,
       publishedAt: parsed && !Number.isNaN(parsed.getTime()) ? parsed : null,
       summary: tag(block, "description") ?? tag(block, "summary"),
+      contentHtml: tag(block, "content:encoded") ?? tag(block, "content"),
+      categories,
     });
   }
   return out;
@@ -76,7 +91,7 @@ export function rssAdapter(opts: { id: string; name: string; feedUrl: string }):
     id: opts.id,
     name: opts.name,
     async fetchListings(fetcher = fetch) {
-      const res = await fetcher(opts.feedUrl, { headers: { "user-agent": "SweepTrackBot/0.1 (+https://sweeptrack.app/bot)" } });
+      const res = await fetcher(opts.feedUrl, { headers: { "user-agent": `${BOT_USER_AGENT}/0.1` } });
       if (!res.ok) throw new Error(`${opts.id}: HTTP ${res.status}`);
       return parseFeed(await res.text(), opts.id);
     },

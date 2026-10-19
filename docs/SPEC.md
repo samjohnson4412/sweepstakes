@@ -8,14 +8,15 @@
 
 | Topic | Decision |
 |---|---|
-| Platform | Web app (installable PWA) + Chromium browser extension (MV3); Firefox later |
-| Audience | Public SaaS, multi-tenant |
+| Platform | Web app (installable PWA with share target) + browser extension (MV3) for Chrome and Firefox |
+| Audience | Public SaaS, multi-tenant, **US only** |
+| Hosting | Cheapest: Google Cloud Run (scale to zero) + Neon Postgres free tier + Cloud Scheduler + Cloudflare Email Routing (§10.1) |
 | Entry automation | **Assisted fill** — extension fills forms, the human clicks Submit |
 | Data sources (v1) | Email inbox + sweepstakes listing sites |
 | Email intake | Per-user forwarding address at launch; Gmail/Outlook OAuth after Google CASA verification |
 | Catalog | Own sponsor-page crawler + user submissions + listing-site aggregation + newsletter parsing |
 | Stack | TypeScript monorepo: Next.js, Postgres (Drizzle ORM), MV3 extension, shared `core` package |
-| Monetization | Freemium subscription |
+| Monetization | Freemium subscription (billing built last) |
 | AMOE | Deadline/postmark tracking, printable cards & envelopes, postage log, batch planner, **mail-on-behalf service** (see §6) |
 | Alerts | Daily entry reminders, ending-soon/high-value matches, win detection |
 | Wins | Full tracking incl. ARV, 1099, affidavit deadlines, yearly tax export |
@@ -73,11 +74,16 @@ The `core` package computes `nextEligibleAt(frequency, lastEntryAt, sponsorTz)`.
 |---|---|---|
 | Sponsor pages | Crawler + rules parser | Primary, legally cleanest. Parse official rules for dates, frequency, eligibility, AMOE. |
 | User submissions | Paste URL / share target / extension "Add this page" | Dedup by canonical URL; community confirms details. |
-| Listing sites (Online-Sweepstakes, ContestGirl, SweepsAdvantage, Sweepstakes Fanatics, Sweeties Sweeps, r/sweepstakes, etc.) | RSS where offered; otherwise adapters | **Review each site's ToS/robots.txt before enabling.** Store only facts + link to the sponsor page, never copy their editorial content. Pursue data partnerships. Online-Sweepstakes content is behind a paid membership — do not scrape logged-in content. |
+| Listing sites | RSS / sitemap adapters (built in: Online-Sweepstakes RSS, Sweeties Sweeps RSS, SweepsAdvantage new-listings sitemap) | Full listing content is stored. **Use is governed by the operator's agreements with each site** (owner decision, Oct 2026). robots.txt is honored per source by default (toggle in Admin). ContestGirl disallows `/sweepstakes/` in robots.txt; Reddit and Sweepstakes Fanatics block bots. More feeds can be added in Admin. |
 | Newsletters | System inbox subscribed to sweepstakes newsletters | Same parser as user email. |
 
-Adapters implement a common `SourceAdapter` interface (`fetch() → RawListing[]`) and feed a
-normalize → dedup → rules-parse → enrich pipeline.
+Pipeline (`packages/ingest`): fetch the feed/sitemap → skip listings already seen → read the
+listing's main content (and its page when needed) → pick the outbound sponsor link → fetch
+the sponsor page + official rules → regex rules parser, Claude fallback when confidence is
+low → check the sponsor page actually matches the listing → skip non-US / ended → merge
+into the catalog keyed by canonical sponsor URL (so the same sweepstakes from several sites
+is one record; fields are only gap-filled, and human corrections are never overwritten).
+Requests are paced per host (2s or the site's Crawl-delay) and SSRF-guarded.
 
 ## 5. Assisted entry (extension)
 
@@ -148,6 +154,20 @@ Billing via Stripe (not in MVP scaffold).
 
 ## 10. Architecture
 
+### 10.1 Hosting (cheapest path)
+
+| Piece | Choice | Expected cost at launch |
+|---|---|---|
+| App + API + cron endpoint | Google Cloud Run, scale to zero, 1 vCPU / 512 MiB | Free tier covers early traffic; a few $/mo as it grows |
+| Postgres | Neon free tier (or Supabase free) | $0 until storage/compute limits, then ~$19/mo |
+| Background work | Cloud Scheduler → `POST /api/cron/tick` every 15 min | First 3 jobs free |
+| Inbound email | Cloudflare Email Routing + Email Worker (`infra/email-worker`) | $0 (domain ~$10/yr) |
+| Secrets | Google Secret Manager | ~$0 |
+
+The crawler is the main compute cost (requests are paced, so runs spend time waiting on the
+network). Keep `maxItemsPerRun` and intervals modest until revenue arrives. `infra/gcp/deploy.sh`
+deploys everything.
+
 ```
 apps/web         Next.js (App Router) — UI, REST API for extension, inbound email webhook
 apps/extension   Chrome MV3 — popup, content script (autofill), background worker
@@ -165,18 +185,21 @@ workers (later)  Crawler / ingestion jobs, alert scheduler (pg-boss or BullMQ)
 
 ## 11. Roadmap
 
-1. **MVP (this scaffold):** accounts, profiles, add-by-URL with rules parsing, tracking,
-   due-today dashboard, entry logging, AMOE tracking + printable cards, wins + tax CSV,
-   inbound email webhook + classifier, extension (due list, autofill, mark entered).
-2. Alerts: scheduler, email digests, web push, extension badge.
-3. Catalog: crawler, listing-site adapters (after ToS review), newsletter inbox, dedup, browse/search UI.
-4. Stripe billing + plan limits.
-5. Gmail/Outlook OAuth (after verification), LLM rules extraction, per-domain autofill mappings.
-6. Mobile polish (PWA share target), Firefox extension, mail-on-behalf (after legal review).
+1. ✅ **MVP:** accounts, profiles, add-by-URL with rules parsing, tracking, due-today dashboard,
+   entry logging, AMOE tracking + printable cards, wins + tax CSV, inbound email + classifier,
+   extension (due list, autofill, mark entered).
+2. ✅ **Catalog & data:** listing-site adapters, sponsor-page crawler (re-crawls tracked items
+   every 3 days), newsletter inbox, dedup/merge, browse/search with state eligibility filter,
+   user corrections, admin source management.
+3. ✅ **Integrations:** Gmail/Outlook OAuth + sync (Gmail public launch still needs Google
+   verification + CASA), Claude rules extraction, crowd-shared per-site autofill mappings,
+   PWA share target, Firefox build, gated mail-on-behalf service with admin rules review.
+4. ✅ **Hosting:** Dockerfile, Cloud Run deploy script, Cloudflare email worker.
+5. Alerts: email digests, web push, extension badge, SMS (pro).
+6. Stripe billing + plan limits.
 
 ## 12. Open questions
 - Product name/domain?
-- US-only at launch, or Canada too (skill-testing questions, different rules)?
-- Which inbound email provider (Postmark / SES / SendGrid)?
-- Hosting preference (Vercel + Neon/Supabase, Fly.io, AWS)?
-- Attorney for sweepstakes/ToS review (listing aggregation and mail-on-behalf)?
+- Agreements with listing sites before public launch (owner is handling).
+- Attorney review of the mail-on-behalf service before enabling it (`MAIL_SERVICE_ENABLED`).
+- Google OAuth verification + CASA assessment timing for public Gmail connect.

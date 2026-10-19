@@ -2,7 +2,8 @@ import Link from "next/link";
 import { amoeEntries, and, db, entrantProfiles, eq, gte, sql, sweepstakes } from "@sweeptrack/db";
 import { requireUser } from "@/lib/auth";
 import { fmtDate, money, relDays } from "@/lib/format";
-import { setAmoeStatus } from "../actions";
+import { mailServiceEnabled } from "@/lib/admin";
+import { cancelMailService, requestMailService, setAmoeStatus } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,14 @@ export default async function AmoePage() {
   const startOfYear = `${new Date().getUTCFullYear()}-01-01`;
   const [rows, [spend]] = await Promise.all([
     db
-      .select({ a: amoeEntries, title: sweepstakes.title, sweepstakesId: sweepstakes.id, firstName: entrantProfiles.firstName })
+      .select({
+        a: amoeEntries,
+        title: sweepstakes.title,
+        sweepstakesId: sweepstakes.id,
+        firstName: entrantProfiles.firstName,
+        amoe: sweepstakes.amoe,
+        amoeReview: sweepstakes.amoeReview,
+      })
       .from(amoeEntries)
       .innerJoin(sweepstakes, eq(sweepstakes.id, amoeEntries.sweepstakesId))
       .innerJoin(entrantProfiles, eq(entrantProfiles.id, amoeEntries.profileId))
@@ -33,6 +41,7 @@ export default async function AmoePage() {
       .where(and(eq(amoeEntries.userId, user.id), sql`${amoeEntries.status} in ('mailed','confirmed')`, gte(amoeEntries.mailedAt, new Date(startOfYear)))),
   ]);
 
+  const service = mailServiceEnabled();
   const groups = new Map<string, typeof rows>();
   for (const r of rows) {
     const key = weekOf(r.a.mailBy);
@@ -78,10 +87,11 @@ export default async function AmoePage() {
                       <th>Deadline</th>
                       <th>Postage</th>
                       <th>Status</th>
+                      {service && <th>Mail service</th>}
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map(({ a, title, sweepstakesId, firstName }) => (
+                    {items.map(({ a, title, sweepstakesId, firstName, amoe, amoeReview }) => (
                       <tr key={a.id}>
                         <td>
                           <input type="checkbox" name="id" value={a.id} form="print" defaultChecked aria-label="Include in print batch" />
@@ -110,6 +120,31 @@ export default async function AmoePage() {
                             <button className="small secondary">Save</button>
                           </form>
                         </td>
+                        {service && (
+                          <td className="small">
+                            {a.fulfilledBy === "service" ? (
+                              <div className="row">
+                                <span className="badge">{a.serviceStatus?.replace("_", " ")}</span>
+                                {(a.serviceStatus === "pending_review" || a.serviceStatus === "queued") && (
+                                  <form action={cancelMailService}>
+                                    <input type="hidden" name="id" value={a.id} />
+                                    <button className="small secondary">Cancel</button>
+                                  </form>
+                                )}
+                              </div>
+                            ) : amoe?.thirdPartyAllowed === "no" || amoeReview === "rejected" ? (
+                              <span className="muted">Rules require you to mail it yourself</span>
+                            ) : a.status === "planned" ? (
+                              <form action={requestMailService} className="stack">
+                                <input type="hidden" name="id" value={a.id} />
+                                <label className="check">
+                                  <input type="checkbox" name="authorize" required /> I authorize SweepTrack to prepare and mail this entry for me
+                                </label>
+                                <button className="small secondary">Request</button>
+                              </form>
+                            ) : null}
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>

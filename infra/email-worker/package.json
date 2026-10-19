@@ -1,0 +1,8 @@
+{
+  "name": "sweeptrack-email-worker",
+  "private": true,
+  "type": "module",
+  "scripts": { "deploy": "wrangler deploy" },
+  "dependencies": { "postal-mime": "^2.4.4" },
+  "devDependencies": { "wrangler": "^4.40.0" }
+}

@@ -1,9 +1,9 @@
-import { apiTokens, db, desc, entrantProfiles, eq } from "@sweeptrack/db";
+import { apiTokens, db, desc, entrantProfiles, eq, mailAccounts } from "@sweeptrack/db";
 import { ActionForm } from "@/components/ActionForm";
 import { requireUser } from "@/lib/auth";
-import { inboundAddress } from "@/lib/inbound";
+import { inboundAddress, providerConfigured } from "@sweeptrack/ingest";
 import { fmtDateTime } from "@/lib/format";
-import { createToken, revokeToken, saveProfile } from "../actions";
+import { createToken, disconnectMail, revokeToken, saveProfile } from "../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -33,13 +33,16 @@ function ProfileFields({ p }: { p?: typeof entrantProfiles.$inferSelect }) {
   );
 }
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ welcome?: string }> }) {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ welcome?: string; mail?: string }> }) {
   const user = await requireUser();
-  const { welcome } = await searchParams;
-  const [profiles, tokens] = await Promise.all([
+  const { welcome, mail } = await searchParams;
+  const [profiles, tokens, mailboxes] = await Promise.all([
     db.select().from(entrantProfiles).where(eq(entrantProfiles.userId, user.id)).orderBy(entrantProfiles.createdAt),
     db.select().from(apiTokens).where(eq(apiTokens.userId, user.id)).orderBy(desc(apiTokens.createdAt)),
+    db.select().from(mailAccounts).where(eq(mailAccounts.userId, user.id)).orderBy(mailAccounts.createdAt),
   ]);
+  const google = providerConfigured("google");
+  const microsoft = providerConfigured("microsoft");
 
   return (
     <div>
@@ -77,9 +80,64 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         </div>
       </div>
 
-      <h2>Email forwarding</h2>
-      <div className="card small">
-        Your forwarding address: <code>{inboundAddress(user.inboundToken)}</code>
+      <h2>Email</h2>
+      {mail && <div className="notice">{mail}</div>}
+      <div className="card stack small">
+        <div>
+          <strong>Forwarding:</strong> send or auto-forward sweepstakes emails to <code>{inboundAddress(user.inboundToken)}</code>
+        </div>
+        <div>
+          <strong>Connect your mailbox</strong> (read-only; we import only sweepstakes-related messages):
+          <div className="row" style={{ marginTop: 6 }}>
+            {google ? (
+              <a className="button small secondary" href="/api/oauth/google/start">
+                Connect Gmail
+              </a>
+            ) : (
+              <span className="muted">Gmail not configured</span>
+            )}
+            {microsoft ? (
+              <a className="button small secondary" href="/api/oauth/microsoft/start">
+                Connect Outlook / Hotmail
+              </a>
+            ) : (
+              <span className="muted">Outlook not configured</span>
+            )}
+          </div>
+        </div>
+        {mailboxes.length > 0 && (
+          <table>
+            <thead>
+              <tr>
+                <th>Mailbox</th>
+                <th>Status</th>
+                <th>Last sync</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {mailboxes.map((m) => (
+                <tr key={m.id}>
+                  <td>
+                    {m.email} <span className="muted">({m.provider === "google" ? "Gmail" : "Outlook"})</span>
+                  </td>
+                  <td>
+                    <span className={`badge ${m.status === "active" ? "good" : "bad"}`}>{m.status}</span>
+                    {m.status === "revoked" && " Reconnect to resume."}
+                    {m.lastError && m.status !== "active" && <div className="muted">{m.lastError}</div>}
+                  </td>
+                  <td>{fmtDateTime(m.lastSyncAt)}</td>
+                  <td>
+                    <form action={disconnectMail}>
+                      <input type="hidden" name="id" value={m.id} />
+                      <button className="small secondary">Disconnect</button>
+                    </form>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <h2>Browser extension</h2>

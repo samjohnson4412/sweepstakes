@@ -93,6 +93,17 @@ function parseMoney(s: string): number {
   return Number(s.replace(/[$,\s]/g, ""));
 }
 
+/** Strip a trailing street address ("Acme Co. 12 Main St…", "…, located at…", "…, PO Box 5"). */
+function cleanSponsor(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const cut = raw
+    .split(/,?\s+(?:located|with (?:its )?(?:offices|headquarters)|whose address|headquartered)\b/i)[0]!
+    .split(/,?\s*P\.?\s?O\.?\s+Box\b/i)[0]!
+    .split(/,?\s+\d{1,6}\s+(?:[A-Za-z0-9.]+\s+){0,4}(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Hill|Pkwy|Parkway|Ct|Court|Hwy|Highway|Suite|Place|Pl)\b/i)[0]!;
+  const s = cut.trim().replace(/,$/, "");
+  return s.length >= 2 ? s : null;
+}
+
 export function parseRules(rawText: string): ParsedRules {
   const text = rawText.replace(/\s+/g, " ");
   const lower = text.toLowerCase();
@@ -101,7 +112,9 @@ export function parseRules(rawText: string): ParsedRules {
 
   // --- Sponsor
   const sponsorMatch = text.match(/\b[Ss]ponsor(?:ed by)?(?:\s+is)?\s*[:\-]?\s+([A-Z][\w&.,' -]{2,80}?)(?:\s*\(|,\s*\d|\.\s|;)/);
-  const sponsor = sponsorMatch?.[1]?.trim().replace(/,$/, "") ?? null;
+  // Labelled "Sponsor: X" on its own line (listing pages) is the most reliable form.
+  const labelled = rawText.match(/^\s*sponsor(?:ed by)?\s*:\s*([^\n]{2,120}?)\s*$/im)?.[1]?.split(/,\s*\d|\s\(/)[0];
+  const sponsor = cleanSponsor(labelled && !/[.;]\s/.test(labelled) ? labelled : sponsorMatch?.[1]);
 
   // --- Dates
   let startsAt = dateNear(text, /\b(begins?|starts?|commences?)\b/i, dates);
@@ -120,7 +133,12 @@ export function parseRules(rawText: string): ParsedRules {
   // --- Frequency (online entry limit)
   let frequency: Frequency | null = null;
   const limit = lower.match(/(?:limit|maximum)[^.]{0,120}|one \(1\) entry[^.]{0,120}|one entry[^.]{0,120}|may enter[^.]{0,120}/g)?.join(" ") ?? "";
-  if (/24[- ]hour/.test(limit)) frequency = "daily_24h";
+  const entryLimitLabel = lower.match(/entry (?:limit|frequency)\s*:\s*([^.]{0,60})/)?.[1] ?? "";
+  if (/single|one[- ]time|one entry/.test(entryLimitLabel)) frequency = "once";
+  else if (/daily|per day|each day/.test(entryLimitLabel)) frequency = "daily";
+  else if (/weekly|per week/.test(entryLimitLabel)) frequency = "weekly";
+  else if (/monthly|per month/.test(entryLimitLabel)) frequency = "monthly";
+  else if (/24[- ]hour/.test(limit)) frequency = "daily_24h";
   else if (/per (?:calendar )?day|each day|daily/.test(limit)) frequency = "daily";
   else if (/per (?:calendar )?week|each week|weekly/.test(limit)) frequency = "weekly";
   else if (/per (?:calendar )?month|each month|monthly/.test(limit)) frequency = "monthly";
@@ -153,12 +171,17 @@ export function parseRules(rawText: string): ParsedRules {
 
   // --- ARV
   let totalArv: number | null = null;
-  const totalMatch = text.match(/total (?:approximate retail value|arv)[^$]{0,60}\$\s?([\d,]+(?:\.\d{2})?)/i);
+  const totalMatch =
+    text.match(/total (?:approximate retail value|arv)[^$]{0,60}\$\s?([\d,]+(?:\.\d{2})?)/i) ??
+    text.match(/total (?:approximate retail value|arv)[^.\d]{0,40}([\d,]+(?:\.\d{2})?)\s*(?:usd|dollars)/i);
   if (totalMatch) {
     totalArv = parseMoney(totalMatch[1]!);
     confidence.arv = 0.85;
   } else {
-    const arvs = [...text.matchAll(/(?:approximate retail value|\bARV\b)[^$]{0,60}\$\s?([\d,]+(?:\.\d{2})?)/gi)].map((m) => parseMoney(m[1]!));
+    const arvs = [
+      ...text.matchAll(/(?:approximate retail value|\bARV\b)[^$]{0,60}\$\s?([\d,]+(?:\.\d{2})?)/gi),
+      ...text.matchAll(/(?:approximate retail value|\bARV\b)[^.\d$]{0,40}([\d,]+(?:\.\d{2})?)\s*(?:usd|dollars)/gi),
+    ].map((m) => parseMoney(m[1]!));
     if (arvs.length) {
       totalArv = Math.max(...arvs);
       confidence.arv = 0.5;
@@ -234,6 +257,8 @@ export function htmlToText(html: string): string {
     .replace(/&#39;|&apos;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n: string) => String.fromCodePoint(parseInt(n, 16)))
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n+/g, "\n")
     .trim();

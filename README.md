@@ -5,31 +5,38 @@ sweepstakes, including mail-in **AMOE** entries, wins, and tax records.
 
 See **[docs/SPEC.md](docs/SPEC.md)** for the product and architecture spec, the decisions made so far, the roadmap, and the open questions.
 
-## What works today (MVP scaffold)
+## What works
 
-- **Accounts:** email/password sign-up, session cookies, and entrant profiles (1 on Free, 5 for a Pro household).
-- **Add a sweepstakes by URL:** fetches the page and its official-rules link (with SSRF protection), then parses
-  start/end dates, entry frequency, age and state eligibility, ARV, and AMOE details (address, postmarked-by vs received-by,
-  hand-print requirement, 3x5 card, SASE, one-per-envelope, and whether third-party or mechanical entries are banned).
-- **Today dashboard:** what's due per entrant (handles daily vs. rolling 24h, the sponsor's timezone, weekly/monthly limits),
-  sweepstakes ending soon, mail-in deadlines, open wins, and win-notice alerts.
-- **Mail-in planner:** mail-by dates (with a USPS transit buffer), a weekly batch view, status tracking, a postage log,
-  and printable 3x5 cards and #10 envelopes.
-- **Wins:** prize, ARV, status, claim/affidavit deadlines, W-9/affidavit checkboxes, likely-1099 flag, and a yearly CSV tax export.
-- **Email:** a per-user forwarding address and a `/api/inbound/email` webhook. Messages are classified as win notice,
-  confirmation, newsletter, or promo, with **scam-signal detection**; likely-real win notices create a draft win automatically,
-  and sweepstakes links in newsletters can be tracked with one click.
-- **Browser extension (Chrome MV3):** due-now list, **assisted form fill** from the selected profile (the user always clicks
-  Submit and solves any CAPTCHA), "Mark entered", and "Track this page".
+- **Accounts and profiles:** email/password sign-up; one entrant profile on Free, five per household on Pro.
+- **Catalog:** sweepstakes flow in automatically from listing-site feeds (Online-Sweepstakes, Sweeties Sweeps,
+  SweepsAdvantage), the newsletter inbox, users' forwarded newsletters, and links users add. Duplicates across sites
+  are merged into one record keyed by the sponsor's entry page. You can browse and search by keyword, frequency,
+  prize value, end date, your state's eligibility, and whether there's a mail-in option.
+- **Rules parsing:** the app reads the sponsor page and official rules and extracts dates, entry frequency, eligibility,
+  ARV, and AMOE details. When the parser isn't confident, Claude fills the gaps (optional). Submitters and admins
+  can correct any details, and later crawls never overwrite those corrections.
+- **Today dashboard, entry logging, mail-in planner, wins, and tax CSV:** as in the MVP.
+- **Mail-on-behalf service (off by default):** users authorize each entry. It's only offered where the rules don't
+  forbid third-party entries, and an admin reviews each sweepstakes' rules before printing and mailing.
+- **Email:** a forwarding address, plus Gmail and Outlook connections (read-only; only sweepstakes-related mail is
+  imported). Win notices and scam signals are flagged, and newsletter links feed the catalog.
+- **Browser extension (Chrome + Firefox):** due list, assisted fill, **"Remember form"** (per-site field mappings,
+  shared across users once several confirm them), mark entered, and track this page.
+- **PWA:** installable; on Android, "Share → SweepTrack" adds a sweepstakes from any app.
+- **Admin** (`ADMIN_EMAILS`): manage sources (enable, robots.txt, interval, run now, add feeds), job failures, and the
+  mail-service queue.
 
 ## Layout
 
 ```
-apps/web         Next.js 15 app (UI, server actions, extension API, inbound email webhook)
-apps/extension   Chrome MV3 extension (esbuild)
-packages/core    Pure TS domain logic: frequency rules, rules parser, email classifier, form matcher, AMOE, tax, sources
-packages/db      Drizzle ORM schema, migrations, seed (Postgres)
-docs/SPEC.md     Product & architecture spec
+apps/web            Next.js 15 app (UI, server actions, extension API, email webhook, cron endpoint, OAuth)
+apps/extension      MV3 extension → build/chrome and build/firefox (esbuild)
+packages/core       Pure TS logic: frequency, rules parser, email classifier, form matcher, robots, feeds/sitemaps
+packages/db         Drizzle ORM schema, migrations, seed, token encryption (Postgres)
+packages/ingest     Server jobs: polite fetcher, catalog pipeline, newsletter import, Gmail/Outlook sync, Claude extraction, tick
+infra/gcp           Cloud Run + Cloud Scheduler deploy script
+infra/email-worker  Cloudflare Email Worker → inbound webhook
+docs/SPEC.md        Product & architecture spec
 ```
 
 ## Getting started
@@ -41,11 +48,14 @@ cp .env.example apps/web/.env.local  # adjust as needed
 export DATABASE_URL=postgres://sweeptrack:sweeptrack@localhost:5432/sweeptrack
 pnpm db:migrate
 pnpm db:seed                         # demo@sweeptrack.local / demo-password
+pnpm ingest seed-sources             # built-in catalog sources
 pnpm dev                             # http://localhost:3000
+pnpm ingest run online-sweepstakes   # pull listings now (or: pnpm ingest tick)
 ```
 
-**Extension:** run `pnpm --filter @sweeptrack/extension build`, then in Chrome open `chrome://extensions`, enable
-Developer mode, choose **Load unpacked**, and select `apps/extension/build`. In the extension's options, enter the app URL
+**Extension:** run `pnpm --filter @sweeptrack/extension build`. In Chrome, open `chrome://extensions`, enable
+Developer mode, choose **Load unpacked**, and select `apps/extension/build/chrome`. In Firefox, open
+`about:debugging` and load `apps/extension/build/firefox/manifest.json` as a temporary add-on. In the extension's options, enter the app URL
 and an API token created under **Settings → Browser extension**.
 
 **Inbound email (local test):**
@@ -56,17 +66,29 @@ curl -X POST localhost:3000/api/inbound/email \
   -d '{"to":"u-<token>@in.sweeptrack.local","from":"prizes@brand.com","subject":"Potential Winner Notification","text":"Congratulations! Return the affidavit by Nov 1, 2026."}'
 ```
 
+## Deploying (cheapest setup)
+
+1. Create a free **Neon** Postgres database. Run `DATABASE_URL=<neon url> pnpm db:migrate && pnpm ingest seed-sources`.
+2. In Google Cloud, create the secrets `DATABASE_URL`, `ENCRYPTION_KEY`, `INBOUND_WEBHOOK_SECRET` and `CRON_SECRET`
+   (optional: `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_SECRET`, `MICROSOFT_CLIENT_SECRET`).
+3. Run `PROJECT=… APP_URL=https://… INBOUND_EMAIL_DOMAIN=in.yourdomain.com ADMIN_EMAILS=you@… ./infra/gcp/deploy.sh`.
+   This deploys to Cloud Run and creates a 15-minute Cloud Scheduler job for `/api/cron/tick`.
+4. **Email:** add your domain to Cloudflare, enable Email Routing for `in.yourdomain.com`, deploy
+   `infra/email-worker` (`npx wrangler deploy`, then `npx wrangler secret put INBOUND_WEBHOOK_SECRET`), and route
+   the catch-all address to the worker. Subscribe `catalog@in.yourdomain.com` to sweepstakes newsletters.
+5. **Gmail/Outlook (optional):** create OAuth clients with redirect `${APP_URL}/api/oauth/google/callback` (or
+   `/microsoft/callback`). Gmail stays in Google's "testing" mode (100 users) until it passes verification.
+
 ## Checks
 
 ```bash
-pnpm test        # core unit tests (vitest)
+pnpm test        # core unit tests + ingest pipeline tests (needs Postgres)
 pnpm typecheck   # all packages
 pnpm build       # web + extension
 ```
 
 After editing `packages/db/src/schema.ts`, run `pnpm db:generate` to create a new migration.
 
-## Not built yet (see roadmap in the spec)
+## Not built yet
 
-Alert delivery (email digests, web push, SMS), the crawler and listing-site adapters (pending a terms-of-service review),
-Stripe billing, Gmail/Outlook OAuth, LLM-assisted rules extraction, and the mail-on-behalf AMOE service (pending legal review).
+Alert delivery (email digests, web push, SMS) and Stripe billing are planned last. See the roadmap in the spec.

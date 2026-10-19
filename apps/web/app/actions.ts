@@ -8,6 +8,9 @@ import {
   and,
   apiTokens,
   db,
+  inArray,
+  sources,
+  sweepstakes,
   entrantProfiles,
   eq,
   hashPassword,
@@ -18,6 +21,9 @@ import {
   verifyPassword,
   wins,
 } from "@sweeptrack/db";
+import { FREQUENCIES, US_STATES } from "@sweeptrack/core";
+import { disconnectMailAccount, endOfDay, enqueue } from "@sweeptrack/ingest";
+import { isAdmin, mailServiceEnabled, requireAdmin } from "@/lib/admin";
 import { createApiToken, createSession, destroySession, requireUser } from "@/lib/auth";
 import { importSweepstakes, logEntry, planAmoe, trackSweepstakes } from "@/lib/sweeps";
 
@@ -254,4 +260,198 @@ export async function revokeToken(fd: FormData) {
   const id = str(fd, "id");
   if (id) await db.delete(apiTokens).where(and(eq(apiTokens.id, id), eq(apiTokens.userId, user.id)));
   revalidatePath("/settings");
+}
+
+// ---------- Catalog ----------
+
+export async function trackFromCatalog(fd: FormData) {
+  const user = await requireUser();
+  const id = z.string().uuid().safeParse(str(fd, "sweepstakesId"));
+  if (!id.success) return;
+  await trackSweepstakes(user.id, id.data);
+  revalidatePath("/catalog");
+  revalidatePath("/dashboard");
+  revalidatePath("/sweepstakes");
+}
+
+const STATE_CODES = new Set(Object.values(US_STATES));
+
+/** Correct catalog details. Allowed for admins and the user who submitted the item. */
+export async function editSweepstakes(_: FormState, fd: FormData): Promise<FormState> {
+  const user = await requireUser();
+  const id = z.string().uuid().safeParse(str(fd, "id"));
+  if (!id.success) return { error: "Missing id" };
+  const row = await db.query.sweepstakes.findFirst({ where: eq(sweepstakes.id, id.data) });
+  if (!row) return { error: "Not found" };
+  if (!isAdmin(user) && row.submittedByUserId !== user.id) return { error: "Only the person who added this (or an admin) can edit it." };
+
+  const parsed = z
+    .object({
+      title: z.string().min(1).max(300),
+      url: z.string().url(),
+      rulesUrl: z.string().url().nullable(),
+      sponsor: z.string().max(200).nullable(),
+      startsAt: dateOrNull,
+      endsAt: dateOrNull,
+      frequency: z.enum(FREQUENCIES),
+      arv: z.coerce.number().min(0).nullable(),
+      minAge: z.coerce.number().int().min(0).max(30).nullable(),
+      excludedStates: z.string().max(200).nullable(),
+      amoeAddress: z.string().max(400).nullable(),
+      amoeDeadline: dateOrNull,
+      amoeDeadlineType: z.enum(["postmarked_by", "received_by", "unknown"]),
+      thirdPartyAllowed: z.enum(["yes", "no", "unknown"]),
+    })
+    .safeParse(
+      Object.fromEntries(
+        ["title", "url", "rulesUrl", "sponsor", "startsAt", "endsAt", "frequency", "arv", "minAge", "excludedStates", "amoeAddress", "amoeDeadline", "amoeDeadlineType", "thirdPartyAllowed"].map(
+          (k) => [k, str(fd, k)],
+        ),
+      ),
+    );
+  if (!parsed.success) return { error: `${parsed.error.issues[0]?.path.join(".")}: ${parsed.error.issues[0]?.message}` };
+  const v = parsed.data;
+  const states = (v.excludedStates ?? "").split(/[\s,]+/).map((x) => x.toUpperCase()).filter(Boolean);
+  const bad = states.filter((x) => !STATE_CODES.has(x));
+  if (bad.length) return { error: `Unknown state code(s): ${bad.join(", ")}` };
+  const noonUtc = (d: string | null) => (d ? new Date(`${d}T12:00:00Z`) : null);
+  const amoeAvailable = Boolean(v.amoeAddress);
+  await db
+    .update(sweepstakes)
+    .set({
+      title: v.title,
+      url: v.url,
+      rulesUrl: v.rulesUrl,
+      sponsor: v.sponsor,
+      startsAt: noonUtc(v.startsAt),
+      endsAt: endOfDay(noonUtc(v.endsAt)),
+      frequency: v.frequency,
+      totalArvCents: v.arv === null ? null : Math.round(v.arv * 100),
+      minAge: v.minAge,
+      excludedStates: states.sort(),
+      amoe: amoeAvailable
+        ? {
+            ...(row.amoe ?? {
+              handwrittenRequired: false,
+              cardSize: null,
+              sasRequired: false,
+              limitPerEnvelope: null,
+              mechanicalReproductionAllowed: "unknown" as const,
+            }),
+            available: true,
+            address: v.amoeAddress,
+            deadline: noonUtc(v.amoeDeadline),
+            deadlineType: v.amoeDeadlineType,
+            thirdPartyAllowed: v.thirdPartyAllowed,
+          }
+        : null,
+      humanEditedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(sweepstakes.id, row.id));
+  revalidatePath(`/sweepstakes/${row.id}`);
+  return { message: "Saved. Automatic updates won't overwrite your corrections." };
+}
+
+// ---------- Mail-on-behalf service (gated; docs/SPEC.md §6.1) ----------
+
+export async function requestMailService(fd: FormData) {
+  const user = await requireUser();
+  if (!mailServiceEnabled()) return;
+  const id = str(fd, "id");
+  if (!id || fd.get("authorize") !== "on") return;
+  const [row] = await db
+    .select({ a: amoeEntries, s: sweepstakes })
+    .from(amoeEntries)
+    .innerJoin(sweepstakes, eq(sweepstakes.id, amoeEntries.sweepstakesId))
+    .where(and(eq(amoeEntries.id, id), eq(amoeEntries.userId, user.id)));
+  if (!row || row.a.status !== "planned" || row.s.amoe?.thirdPartyAllowed === "no" || row.s.amoeReview === "rejected") return;
+  await db
+    .update(amoeEntries)
+    .set({ fulfilledBy: "service", serviceStatus: row.s.amoeReview === "approved" ? "queued" : "pending_review", serviceAuthorizedAt: new Date() })
+    .where(eq(amoeEntries.id, id));
+  revalidatePath("/amoe");
+}
+
+export async function cancelMailService(fd: FormData) {
+  const user = await requireUser();
+  const id = str(fd, "id");
+  if (!id) return;
+  await db
+    .update(amoeEntries)
+    .set({ fulfilledBy: "self", serviceStatus: null, serviceAuthorizedAt: null })
+    .where(and(eq(amoeEntries.id, id), eq(amoeEntries.userId, user.id), inArray(amoeEntries.serviceStatus, ["pending_review", "queued"])));
+  revalidatePath("/amoe");
+}
+
+// ---------- Admin ----------
+
+export async function reviewAmoe(fd: FormData) {
+  await requireAdmin();
+  const id = str(fd, "sweepstakesId");
+  const decision = z.enum(["approved", "rejected"]).safeParse(str(fd, "decision"));
+  if (!id || !decision.success) return;
+  await db.update(sweepstakes).set({ amoeReview: decision.data, amoeReviewNote: str(fd, "note") }).where(eq(sweepstakes.id, id));
+  await db
+    .update(amoeEntries)
+    .set({ serviceStatus: decision.data === "approved" ? "queued" : "rejected", ...(decision.data === "rejected" ? { fulfilledBy: "self" } : {}) })
+    .where(and(eq(amoeEntries.sweepstakesId, id), eq(amoeEntries.serviceStatus, "pending_review")));
+  revalidatePath("/admin/mail");
+}
+
+export async function setServiceStatus(fd: FormData) {
+  await requireAdmin();
+  const ids = fd.getAll("id").map(String).filter((x) => /^[0-9a-f-]{36}$/i.test(x));
+  const status = z.enum(["printed", "mailed"]).safeParse(str(fd, "status"));
+  if (!ids.length || !status.success) return;
+  await db
+    .update(amoeEntries)
+    .set(status.data === "mailed" ? { serviceStatus: "mailed", status: "mailed", mailedAt: new Date() } : { serviceStatus: "printed", status: "prepared" })
+    .where(and(inArray(amoeEntries.id, ids), eq(amoeEntries.fulfilledBy, "service")));
+  revalidatePath("/admin/mail");
+}
+
+export async function updateSource(fd: FormData) {
+  await requireAdmin();
+  const id = str(fd, "id");
+  if (!id) return;
+  await db
+    .update(sources)
+    .set({
+      enabled: fd.get("enabled") === "on",
+      respectRobots: fd.get("respectRobots") === "on",
+      followSponsor: fd.get("followSponsor") === "on",
+      intervalMinutes: Math.max(30, Number(str(fd, "intervalMinutes")) || 360),
+      maxItemsPerRun: Math.min(200, Math.max(1, Number(str(fd, "maxItemsPerRun")) || 40)),
+    })
+    .where(eq(sources.id, id));
+  revalidatePath("/admin");
+}
+
+export async function runSourceNow(fd: FormData) {
+  await requireAdmin();
+  const id = str(fd, "id");
+  if (id) await enqueue("run-source", { sourceId: id });
+  revalidatePath("/admin");
+}
+
+export async function addSource(_: FormState, fd: FormData): Promise<FormState> {
+  await requireAdmin();
+  const parsed = z
+    .object({ id: z.string().regex(/^[a-z0-9-]{2,40}$/, "id: lowercase letters, digits, dashes"), name: z.string().min(2).max(100), kind: z.enum(["rss", "sitemap"]), url: z.string().url() })
+    .safeParse({ id: str(fd, "id"), name: str(fd, "name"), kind: str(fd, "kind"), url: str(fd, "url") });
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message };
+  const [row] = await db.insert(sources).values({ ...parsed.data, enabled: true }).onConflictDoNothing().returning();
+  revalidatePath("/admin");
+  return row ? { message: "Source added" } : { error: "A source with that id already exists" };
+}
+
+// ---------- Connected mailboxes ----------
+
+export async function disconnectMail(fd: FormData) {
+  const user = await requireUser();
+  const id = str(fd, "id");
+  if (id) await disconnectMailAccount(user.id, id);
+  revalidatePath("/settings");
+  revalidatePath("/inbox");
 }

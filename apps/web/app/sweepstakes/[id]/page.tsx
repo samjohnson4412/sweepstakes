@@ -1,10 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { amoeEntries, and, db, desc, entrantProfiles, entries, eq, sweepstakes, trackedSweepstakes } from "@sweeptrack/db";
+import { ActionForm } from "@/components/ActionForm";
+import { isAdmin } from "@/lib/admin";
 import { requireUser } from "@/lib/auth";
 import { getTrackedRows } from "@/lib/sweeps";
 import { FREQUENCY_LABEL, fmtDate, fmtDateTime, money, relDays } from "@/lib/format";
-import { markEntered, planAmoeAction, setFrequencyOverride } from "../../actions";
+import { editSweepstakes, markEntered, planAmoeAction, setFrequencyOverride, trackFromCatalog } from "../../actions";
+
+const isoDay = (d: Date | string | null | undefined) => (d ? new Date(d).toISOString().slice(0, 10) : "");
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +34,7 @@ export default async function SweepstakesDetail({ params }: { params: Promise<{ 
   ]);
 
   const a = s.amoe;
+  const canEdit = isAdmin(user) || s.submittedByUserId === user.id;
   const lowConfidence = Object.values(s.parseConfidence ?? {}).some((c) => c < 0.6);
 
   return (
@@ -48,7 +53,23 @@ export default async function SweepstakesDetail({ params }: { params: Promise<{ 
           </a>
         )}
       </div>
-      {lowConfidence && (
+      {!tracked && (
+        <form action={trackFromCatalog} style={{ marginBottom: 12 }}>
+          <input type="hidden" name="sweepstakesId" value={s.id} />
+          <button>Track this sweepstakes</button>
+        </form>
+      )}
+      {s.description && <p className="muted">{s.description}</p>}
+      {s.categories.length > 0 && (
+        <p className="row">
+          {s.categories.map((c) => (
+            <span key={c} className="badge">
+              {c}
+            </span>
+          ))}
+        </p>
+      )}
+      {lowConfidence && !s.humanEditedAt && (
         <div className="notice warn small">Some details were auto-detected with low confidence. Double-check them against the official rules.</div>
       )}
 
@@ -156,6 +177,89 @@ export default async function SweepstakesDetail({ params }: { params: Promise<{ 
           )}
         </div>
       </div>
+
+      {canEdit && (
+        <details className="card" style={{ marginTop: 16 }}>
+          <summary style={{ cursor: "pointer" }}>Correct details</summary>
+          <div style={{ marginTop: 12 }}>
+            <ActionForm action={editSweepstakes} submitLabel="Save corrections">
+              <input type="hidden" name="id" value={s.id} />
+              <div className="fields">
+                <label style={{ gridColumn: "span 2" }}>
+                  Title
+                  <input name="title" defaultValue={s.title} required />
+                </label>
+                <label style={{ gridColumn: "span 2" }}>
+                  Entry page URL
+                  <input name="url" type="url" defaultValue={s.url} required />
+                </label>
+                <label style={{ gridColumn: "span 2" }}>
+                  Official rules URL
+                  <input name="rulesUrl" type="url" defaultValue={s.rulesUrl ?? ""} />
+                </label>
+                <label>
+                  Sponsor
+                  <input name="sponsor" defaultValue={s.sponsor ?? ""} />
+                </label>
+                <label>
+                  Starts
+                  <input name="startsAt" type="date" defaultValue={isoDay(s.startsAt)} />
+                </label>
+                <label>
+                  Ends
+                  <input name="endsAt" type="date" defaultValue={s.endsAt ? isoDay(new Date(s.endsAt.getTime() - 86_400_000)) : ""} />
+                </label>
+                <label>
+                  Frequency
+                  <select name="frequency" defaultValue={s.frequency}>
+                    {Object.entries(FREQUENCY_LABEL).map(([k, v]) => (
+                      <option key={k} value={k}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Total ARV ($)
+                  <input name="arv" type="number" min="0" step="0.01" defaultValue={s.totalArvCents != null ? s.totalArvCents / 100 : ""} />
+                </label>
+                <label>
+                  Minimum age
+                  <input name="minAge" type="number" min="0" max="30" defaultValue={s.minAge ?? ""} />
+                </label>
+                <label>
+                  Void in states
+                  <input name="excludedStates" defaultValue={s.excludedStates.join(", ")} placeholder="FL, NY, RI" />
+                </label>
+                <label style={{ gridColumn: "span 2" }}>
+                  Mail-in address (blank if none)
+                  <input name="amoeAddress" defaultValue={a?.address ?? ""} />
+                </label>
+                <label>
+                  Mail-in deadline
+                  <input name="amoeDeadline" type="date" defaultValue={isoDay(a?.deadline)} />
+                </label>
+                <label>
+                  Deadline type
+                  <select name="amoeDeadlineType" defaultValue={a?.deadlineType ?? "unknown"}>
+                    <option value="postmarked_by">Postmarked by</option>
+                    <option value="received_by">Received by</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                </label>
+                <label>
+                  Third-party mailing allowed
+                  <select name="thirdPartyAllowed" defaultValue={a?.thirdPartyAllowed ?? "unknown"}>
+                    <option value="unknown">Unknown</option>
+                    <option value="no">No</option>
+                    <option value="yes">Yes</option>
+                  </select>
+                </label>
+              </div>
+            </ActionForm>
+          </div>
+        </details>
+      )}
 
       <h2>Entry history</h2>
       {history.length === 0 ? (

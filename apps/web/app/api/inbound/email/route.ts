@@ -1,16 +1,15 @@
-import { timingSafeEqual } from "node:crypto";
-import { processInboundEmail } from "@/lib/inbound";
+import { routeInboundEmail } from "@sweeptrack/ingest";
+import { secretMatches } from "@/lib/secrets";
 
 /**
- * Inbound email webhook. Point your provider (Postmark, SendGrid Inbound Parse, Mailgun, SES→Lambda)
- * here and have it send `X-Inbound-Secret: $INBOUND_WEBHOOK_SECRET`.
+ * Inbound email webhook. The Cloudflare Email Worker in infra/email-worker (or Postmark,
+ * SendGrid Inbound Parse, Mailgun) POSTs here with `X-Inbound-Secret: $INBOUND_WEBHOOK_SECRET`.
+ * Mail to u-<token>@ goes to that user; mail to catalog@ feeds the shared catalog.
  * Accepts JSON `{ to, from, subject, text }` or multipart/form-data with the same field names
  * (SendGrid's format). Postmark's `To/From/Subject/TextBody` keys are also understood.
  */
 export async function POST(req: Request) {
-  const secret = process.env.INBOUND_WEBHOOK_SECRET;
-  const given = req.headers.get("x-inbound-secret") ?? "";
-  if (!secret || given.length !== secret.length || !timingSafeEqual(Buffer.from(given), Buffer.from(secret))) {
+  if (!secretMatches(req.headers.get("x-inbound-secret"), process.env.INBOUND_WEBHOOK_SECRET)) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
@@ -25,12 +24,14 @@ export async function POST(req: Request) {
     for (const k of keys) if (typeof fields[k] === "string") return fields[k] as string;
     return "";
   };
-  const result = await processInboundEmail({
+  const html = pick("html", "HtmlBody", "body-html") || null;
+  const result = await routeInboundEmail({
     to: pick("to", "To", "OriginalRecipient"),
     from: pick("from", "From"),
     subject: pick("subject", "Subject"),
-    text: pick("text", "TextBody", "body-plain") || pick("html", "HtmlBody").replace(/<[^>]+>/g, " "),
+    text: pick("text", "TextBody", "body-plain") || (html ?? "").replace(/<[^>]+>/g, " "),
+    html,
   });
   // Always 200 for unknown recipients so providers don't retry forever.
-  return Response.json(result.ok ? { ok: true, category: result.classification.category } : { ok: false, reason: result.reason });
+  return Response.json(result);
 }

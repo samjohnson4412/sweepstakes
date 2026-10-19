@@ -1,5 +1,6 @@
 import type { EntrantProfileData } from "@sweeptrack/core";
 import { api, getSettings, type Settings } from "./api";
+import type { FieldMapping } from "./fill";
 
 type Profile = EntrantProfileData & { id: string; isDefault: boolean };
 interface DueItem { sweepstakesId: string; title: string; url: string; endsAt: string | null; profileId: string; profileName: string }
@@ -85,26 +86,59 @@ async function main() {
     $("add").hidden = !tab?.url?.startsWith("http");
   }
 
-  $("fill").addEventListener("click", () => void fillForm(tab, profiles, select.value));
+  $("fill").addEventListener("click", () => void fillForm(settings, tab, profiles, select.value));
+  $("learn").addEventListener("click", () => void learnForm(settings, tab, profiles, select.value));
   $("mark").addEventListener("click", () => void markEntered(settings, match!.sweepstakesId, select.value));
   $("add").addEventListener("click", () => void addPage(settings, tab));
 }
 
-async function fillForm(tab: chrome.tabs.Tab | undefined, profiles: Profile[], profileId: string) {
+function domainOf(tab: chrome.tabs.Tab | undefined): string | null {
+  try {
+    return tab?.url ? new URL(tab.url).hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fillForm(settings: Settings, tab: chrome.tabs.Tab | undefined, profiles: Profile[], profileId: string) {
   const profile = profiles.find((p) => p.id === profileId);
   if (!tab?.id || !profile) return;
   try {
+    const domain = domainOf(tab);
+    const { mappings } = domain
+      ? await api<{ mappings: FieldMapping[] }>(settings, `/api/ext/mappings?domain=${encodeURIComponent(domain)}`).catch(() => ({ mappings: [] }))
+      : { mappings: [] };
     await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["fill.js"] });
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
-      func: (p: EntrantProfileData) =>
-        (window as unknown as { __sweeptrackFill: (p: EntrantProfileData) => { filled: number } }).__sweeptrackFill(p),
-      args: [profile],
+      func: (p: EntrantProfileData, m: FieldMapping[]) =>
+        (window as unknown as { __sweeptrackFill: (p: EntrantProfileData, m: FieldMapping[]) => { filled: number } }).__sweeptrackFill(p, m),
+      args: [profile, mappings],
     });
     const filled = results.reduce((n, r) => n + ((r.result as { filled: number } | undefined)?.filled ?? 0), 0);
     status(filled ? `Filled ${filled} field(s). Review, solve any CAPTCHA, then click Submit.` : "No matching fields found on this page.");
   } catch (e) {
     status(`Couldn't fill this page: ${(e as Error).message}`);
+  }
+}
+
+async function learnForm(settings: Settings, tab: chrome.tabs.Tab | undefined, profiles: Profile[], profileId: string) {
+  const profile = profiles.find((p) => p.id === profileId);
+  const domain = domainOf(tab);
+  if (!tab?.id || !profile || !domain) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["fill.js"] });
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (p: EntrantProfileData) => (window as unknown as { __sweeptrackLearn: (p: EntrantProfileData) => FieldMapping[] }).__sweeptrackLearn(p),
+      args: [profile],
+    });
+    const mappings = (res?.result as FieldMapping[] | undefined) ?? [];
+    if (!mappings.length) return status("No fields on this page match your profile yet. Fill them in first.");
+    await api(settings, "/api/ext/mappings", { method: "POST", body: JSON.stringify({ domain, mappings }) });
+    status(`Remembered ${mappings.length} field(s) for ${domain}.`);
+  } catch (e) {
+    status(`Couldn't save: ${(e as Error).message}`);
   }
 }
 

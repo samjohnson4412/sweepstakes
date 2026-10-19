@@ -1,0 +1,9 @@
+# Cloudflare Email Worker: receives mail for in.<your-domain> and forwards it to the app.
+name = "sweeptrack-email"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[vars]
+APP_URL = "https://app.example.com"
+
+# Set the shared secret with: npx wrangler secret put INBOUND_WEBHOOK_SECRET

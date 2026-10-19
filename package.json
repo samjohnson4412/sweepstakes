@@ -9,7 +9,8 @@
     "typecheck": "pnpm -r typecheck",
     "db:generate": "pnpm --filter @sweeptrack/db generate",
     "db:migrate": "pnpm --filter @sweeptrack/db migrate",
-    "db:seed": "pnpm --filter @sweeptrack/db seed"
+    "db:seed": "pnpm --filter @sweeptrack/db seed",
+    "ingest": "pnpm --filter @sweeptrack/ingest cli"
   },
   "devDependencies": {
     "typescript": "~5.9.3"

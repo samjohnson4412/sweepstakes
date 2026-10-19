@@ -1,6 +1,6 @@
 import { and, db, desc, eq, inboundMessages } from "@sweeptrack/db";
 import { requireUser } from "@/lib/auth";
-import { inboundAddress } from "@/lib/inbound";
+import { inboundAddress } from "@sweeptrack/ingest";
 import { fmtDateTime } from "@/lib/format";
 import { dismissMessage, importLink } from "../actions";
 

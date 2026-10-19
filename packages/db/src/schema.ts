@@ -13,6 +13,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { AMOE_STATUSES, EMAIL_CATEGORIES, ENTRY_METHODS, FREQUENCIES, type ParsedRules } from "@sweeptrack/core";
 
 export const planEnum = pgEnum("plan", ["free", "pro"]);
@@ -23,6 +24,17 @@ export const emailCategoryEnum = pgEnum("email_category", EMAIL_CATEGORIES);
 export const trackedStatusEnum = pgEnum("tracked_status", ["active", "paused", "ended", "hidden"]);
 export const winStatusEnum = pgEnum("win_status", ["notified", "claimed", "received", "forfeited", "declined"]);
 export const deadlineTypeEnum = pgEnum("amoe_deadline_type", ["postmarked_by", "received_by", "unknown"]);
+export const amoeReviewEnum = pgEnum("amoe_review", ["approved", "rejected"]);
+export const sourceKindEnum = pgEnum("source_kind", ["rss", "sitemap", "newsletter"]);
+export const jobStatusEnum = pgEnum("job_status", ["queued", "running", "done", "failed"]);
+export const mailProviderEnum = pgEnum("mail_provider", ["google", "microsoft"]);
+export const mailServiceStatusEnum = pgEnum("mail_service_status", [
+  "pending_review",
+  "queued",
+  "printed",
+  "mailed",
+  "rejected",
+]);
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -39,6 +51,7 @@ export const users = pgTable("users", {
   /** Local part token for the user's forwarding address: u-<token>@INBOUND_EMAIL_DOMAIN */
   inboundToken: text("inbound_token").notNull().unique(),
   timezone: text("timezone").default("America/New_York").notNull(),
+  isAdmin: boolean("is_admin").default(false).notNull(),
   ...timestamps,
 });
 
@@ -90,11 +103,14 @@ export const sweepstakes = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     canonicalUrl: text("canonical_url").notNull().unique(),
+    /** Page the user enters on (the sponsor's page when known, else the listing page). */
     url: text("url").notNull(),
     rulesUrl: text("rules_url"),
     title: text("title").notNull(),
     sponsor: text("sponsor"),
     prizeSummary: text("prize_summary"),
+    description: text("description"),
+    categories: text("categories").array().default([]).notNull(),
     totalArvCents: integer("total_arv_cents"),
     startsAt: timestamp("starts_at", { withTimezone: true }),
     endsAt: timestamp("ends_at", { withTimezone: true }),
@@ -105,11 +121,18 @@ export const sweepstakes = pgTable(
     excludedStates: text("excluded_states").array().default([]).notNull(),
     amoe: jsonb("amoe").$type<AmoeDetails>(),
     parseConfidence: jsonb("parse_confidence").$type<ParsedRules["confidence"]>(),
+    /** Admin decision on whether the mail-on-behalf service may be used (docs/SPEC.md §6.1). */
+    amoeReview: amoeReviewEnum("amoe_review"),
+    amoeReviewNote: text("amoe_review_note"),
     submittedByUserId: uuid("submitted_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** Set when a person corrects details; ingestion then stops overwriting fields. */
+    humanEditedAt: timestamp("human_edited_at", { withTimezone: true }),
+    lastCrawledAt: timestamp("last_crawled_at", { withTimezone: true }),
+    llmEnrichedAt: timestamp("llm_enriched_at", { withTimezone: true }),
     ...timestamps,
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("sweepstakes_ends_at_idx").on(t.endsAt)],
+  (t) => [index("sweepstakes_ends_at_idx").on(t.endsAt), index("sweepstakes_created_at_idx").on(t.createdAt)],
 );
 
 /** Where a catalog item was seen (crawler, listing-site adapter, newsletter, user). */
@@ -182,6 +205,8 @@ export const amoeEntries = pgTable(
     mailedAt: timestamp("mailed_at", { withTimezone: true }),
     /** self | service — "service" is the gated mail-on-behalf feature (see docs/SPEC.md §6.1) */
     fulfilledBy: text("fulfilled_by").default("self").notNull(),
+    serviceStatus: mailServiceStatusEnum("service_status"),
+    serviceAuthorizedAt: timestamp("service_authorized_at", { withTimezone: true }),
     notes: text("notes"),
     ...timestamps,
   },
@@ -203,8 +228,15 @@ export const inboundMessages = pgTable(
     scamSignals: jsonb("scam_signals").$type<string[]>().default([]).notNull(),
     links: jsonb("links").$type<string[]>().default([]).notNull(),
     dismissed: boolean("dismissed").default(false).notNull(),
+    /** forward | google | microsoft */
+    source: text("source").default("forward").notNull(),
+    /** Provider message id for synced mailboxes, used to skip duplicates. */
+    externalId: text("external_id"),
   },
-  (t) => [index("inbound_user_received_idx").on(t.userId, t.receivedAt)],
+  (t) => [
+    index("inbound_user_received_idx").on(t.userId, t.receivedAt),
+    uniqueIndex("inbound_user_external_uq").on(t.userId, t.externalId).where(sql`${t.externalId} is not null`),
+  ],
 );
 
 export const wins = pgTable(
@@ -228,4 +260,92 @@ export const wins = pgTable(
     ...timestamps,
   },
   (t) => [index("wins_user_idx").on(t.userId)],
+);
+
+// ---------- Catalog ingestion ----------
+
+/** A configured catalog source (listing-site feed/sitemap, or the newsletter inbox). */
+export const sources = pgTable("sources", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  kind: sourceKindEnum("kind").notNull(),
+  url: text("url"),
+  enabled: boolean("enabled").default(false).notNull(),
+  /** Fetch each listing's own page to find the sponsor link and more details. */
+  fetchDetail: boolean("fetch_detail").default(true).notNull(),
+  /** Follow through to the sponsor's page + official rules and parse them. */
+  followSponsor: boolean("follow_sponsor").default(true).notNull(),
+  respectRobots: boolean("respect_robots").default(true).notNull(),
+  intervalMinutes: integer("interval_minutes").default(360).notNull(),
+  maxItemsPerRun: integer("max_items_per_run").default(40).notNull(),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  lastStatus: text("last_status"),
+  lastError: text("last_error"),
+  lastItemCount: integer("last_item_count"),
+  ...timestamps,
+});
+
+/** Items a source has already processed, so reruns only handle new listings. */
+export const ingestSeen = pgTable(
+  "ingest_seen",
+  {
+    sourceId: text("source_id").notNull().references(() => sources.id, { onDelete: "cascade" }),
+    itemKey: text("item_key").notNull(),
+    sweepstakesId: uuid("sweepstakes_id").references(() => sweepstakes.id, { onDelete: "set null" }),
+    seenAt: timestamp("seen_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.sourceId, t.itemKey] })],
+);
+
+/** Minimal Postgres-backed job queue, drained by the cron tick. */
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().default({}).notNull(),
+    status: jobStatusEnum("status").default("queued").notNull(),
+    attempts: integer("attempts").default(0).notNull(),
+    runAfter: timestamp("run_after", { withTimezone: true }).defaultNow().notNull(),
+    lastError: text("last_error"),
+    ...timestamps,
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("jobs_pick_idx").on(t.status, t.runAfter)],
+);
+
+// ---------- Connected mailboxes ----------
+
+export const mailAccounts = pgTable(
+  "mail_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    provider: mailProviderEnum("provider").notNull(),
+    email: text("email").notNull(),
+    /** AES-256-GCM encrypted (see crypto.ts) */
+    refreshTokenEnc: text("refresh_token_enc").notNull(),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    /** active | error | revoked */
+    status: text("status").default("active").notNull(),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("mail_accounts_uq").on(t.userId, t.provider, t.email)],
+);
+
+// ---------- Extension autofill ----------
+
+/** A user's confirmation that `selector` on `domain` holds profile `field`; shared across users once confirmed by several. */
+export const fieldMappings = pgTable(
+  "field_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    domain: text("domain").notNull(),
+    selector: text("selector").notNull(),
+    field: text("field").notNull(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("field_mappings_uq").on(t.domain, t.selector, t.field, t.userId), index("field_mappings_domain_idx").on(t.domain)],
 );
