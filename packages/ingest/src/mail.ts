@@ -34,7 +34,7 @@ const GMAIL_QUERY =
 const FIRST_SYNC_DAYS = 14;
 
 export function appUrl(): string {
-  return (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "");
+  return (process.env.APP_URL ?? "http://localhost:4100").replace(/\/$/, "");
 }
 
 export function providerConfigured(p: MailProvider): boolean {

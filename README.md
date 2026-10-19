@@ -49,9 +49,13 @@ export DATABASE_URL=postgres://sweeptrack:sweeptrack@localhost:5432/sweeptrack
 pnpm db:migrate
 pnpm db:seed                         # demo@sweeptrack.local / demo-password
 pnpm ingest seed-sources             # built-in catalog sources
-pnpm dev                             # http://localhost:3000
+pnpm dev                             # http://localhost:4100 (other port: pnpm dev -p 5000)
 pnpm ingest run online-sweepstakes   # pull listings now (or: pnpm ingest tick)
 ```
+
+**Ports:** the app uses 4100 (`pnpm dev -p <port>` to change it, and update `APP_URL` in `apps/web/.env.local` to
+match). If something else already uses Postgres's 5432, start the database with `DB_PORT=5433 docker compose up -d`
+and change `DATABASE_URL` to `localhost:5433` (in `apps/web/.env.local`, and in your shell for `pnpm db:*` / `pnpm ingest`).
 
 **Extension:** run `pnpm --filter @sweeptrack/extension build`. In Chrome, open `chrome://extensions`, enable
 Developer mode, choose **Load unpacked**, and select `apps/extension/build/chrome`. In Firefox, open
@@ -61,7 +65,7 @@ and an API token created under **Settings → Browser extension**.
 **Inbound email (local test):**
 
 ```bash
-curl -X POST localhost:3000/api/inbound/email \
+curl -X POST localhost:4100/api/inbound/email \
   -H 'content-type: application/json' -H 'x-inbound-secret: change-me' \
   -d '{"to":"u-<token>@in.sweeptrack.local","from":"prizes@brand.com","subject":"Potential Winner Notification","text":"Congratulations! Return the affidavit by Nov 1, 2026."}'
 ```

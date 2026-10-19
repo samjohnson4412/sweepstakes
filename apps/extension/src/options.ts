@@ -4,7 +4,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 async function load() {
   const { apiBase, token } = await chrome.storage.local.get(["apiBase", "token"]);
-  $<HTMLInputElement>("apiBase").value = (apiBase as string) ?? "http://localhost:3000";
+  $<HTMLInputElement>("apiBase").value = (apiBase as string) ?? "http://localhost:4100";
   $<HTMLInputElement>("token").value = (token as string) ?? "";
 }
 
